@@ -7,28 +7,35 @@ const getAI = () => {
 };
 
 // Helper to convert stored blobs to Gemini parts
+// Optimized: Downloads all missing files in parallel
 const filesToParts = async (files: StoredFile[]) => {
-  const parts = [];
-  for (const file of files) {
-    // IMPORTANT: Check if content exists, if not, hydrate (download) it
-    let blob = await dbService.getFileContent(file.id);
-    
-    if (!blob) {
-        // If it's a known law from our static list (id matches name), try to download it now
-        blob = await dbService.hydrateFile(file.id);
-    }
+  const promises = files.map(async (file) => {
+    try {
+      // IMPORTANT: Check if content exists, if not, hydrate (download) it
+      let blob = await dbService.getFileContent(file.id);
+      
+      if (!blob) {
+          // If it's a known law from our static list (id matches name), try to download it now
+          blob = await dbService.hydrateFile(file.id);
+      }
 
-    if (blob) {
-      const base64 = await dbService.blobToBase64(blob);
-      parts.push({
-        inlineData: {
-          mimeType: file.type || 'application/pdf',
-          data: base64
-        }
-      });
+      if (blob) {
+        const base64 = await dbService.blobToBase64(blob);
+        return {
+          inlineData: {
+            mimeType: file.type || 'application/pdf',
+            data: base64
+          }
+        };
+      }
+    } catch (e) {
+      console.error(`Failed to prepare file ${file.name} for AI:`, e);
     }
-  }
-  return parts;
+    return null;
+  });
+
+  const results = await Promise.all(promises);
+  return results.filter((part): part is { inlineData: { mimeType: string; data: string } } => part !== null);
 };
 
 export const consultLibrarian = async (
@@ -52,12 +59,12 @@ export const consultLibrarian = async (
     Task: Identify exactly which documents from the list are strictly necessary to answer the query.
     Return ONLY a JSON array of the file IDs (filenames). 
     If the query is general greeting, return empty array.
-    Select max 3 most relevant documents.
+    Select max 5 most relevant documents.
   `;
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: "gemini-1.5-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -68,9 +75,22 @@ export const consultLibrarian = async (
       }
     });
 
-    const text = response.text;
+    let text = response.text;
     if (!text) return [];
-    return JSON.parse(text) as string[];
+
+    // ZGJIDHJA PËRFUNDIMTARE E GABIMIT TE ANALIZËS
+    // Përdorim Regex për të gjetur vetëm pjesën e array-t JSON [...]
+    // Kjo injoron çdo tekst tjetër që AI mund të shtojë gabimisht.
+    const jsonMatch = text.match(/\[.*\]/s);
+    
+    if (jsonMatch) {
+        return JSON.parse(jsonMatch[0]) as string[];
+    } else {
+        // Fallback nëse Regex dështon
+        text = text.replace(/```json\n?|```/g, '').trim();
+        return JSON.parse(text) as string[];
+    }
+
   } catch (error) {
     console.error("Librarian Error:", error);
     return [];
@@ -85,38 +105,45 @@ export const consultLawyer = async (
 ): Promise<string> => {
   const ai = getAI();
 
-  // 1. Prepare Case Files
-  const caseFileParts = await filesToParts(caseFiles);
-
-  // 2. Prepare Law Files (This triggers download if missing)
-  const lawFileParts = await filesToParts(relevantLaws);
-
-  // 3. Construct System Instruction
-  const systemInstruction = `
-    Ti je "Juristi im", një Konsulent i Lartë Ligjor AI ekspert.
-    
-    Konteksti:
-    1. Ti ke akses në "Dosjet e Çështjes" specifike të ofruara nga përdoruesi.
-    2. Ti ke akses në një "Bazë Ligjore" (ligje, kode) që janë gjetur si relevante për këtë kërkesë.
-
-    Udhëzime:
-    - Përgjigju profesionalisht në GJUHËN SHQIPE.
-    - Cito nenet specifike nga Baza Ligjore.
-    - Përdor formatim Markdown të pasur.
-    - Mos shpik ligje. Nëse dokumentet nuk mjaftojnë, kërko më shumë informacion.
-  `;
-
-  const contents = [
-    ...caseFileParts, 
-    ...lawFileParts,  
-    { text: `Konteksti i Bisedës:\n${chatHistory}\n\nPyetja Aktuale: ${query}` }
-  ];
-
   try {
+    // 1. Prepare Case Files
+    const caseFileParts = await filesToParts(caseFiles);
+
+    // 2. Prepare Law Files (This triggers download if missing)
+    const lawFileParts = await filesToParts(relevantLaws);
+
+    // 3. Construct System Instruction
+    const systemInstruction = `
+      Ti je "Juristi im", një Konsulent i Lartë Ligjor AI ekspert.
+      
+      Konteksti:
+      1. Ti ke akses në "Dosjet e Çështjes" specifike të ofruara nga përdoruesi.
+      2. Ti ke akses në një "Bazë Ligjore" (ligje, kode) që janë gjetur si relevante për këtë kërkesë.
+
+      Udhëzime:
+      - Përgjigju profesionalisht në GJUHËN SHQIPE.
+      - Cito nenet specifike nga Baza Ligjore nëse është e mundur.
+      - Përdor formatim Markdown të pasur (bold, lista, tituj).
+      - Mos shpik ligje. Nëse dokumentet nuk mjaftojnë, thuaj që duhet më shumë informacion.
+    `;
+
+    const contents = [
+      ...caseFileParts, 
+      ...lawFileParts,  
+      { text: `Konteksti i Bisedës:\n${chatHistory}\n\nPyetja Aktuale: ${query}` }
+    ];
+
+    console.log(`Sending to AI: ${caseFileParts.length} case files, ${lawFileParts.length} law files.`);
+
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: "gemini-1.5-flash",
       contents: {
-        parts: contents.flatMap(c => (c.inlineData ? [c] : [{ text: (c as any).text }]))
+        parts: contents.map(c => {
+          if ('inlineData' in c) {
+            return c;
+          }
+          return { text: c.text };
+        })
       },
       config: {
         systemInstruction: systemInstruction,
@@ -126,7 +153,7 @@ export const consultLawyer = async (
 
     return response.text || "Nuk munda të gjeneroj përgjigje.";
   } catch (error) {
-    console.error("Lawyer Error:", error);
-    return "Ndodhi një gabim gjatë analizimit. Sigurohuni që dokumentet janë të lexueshme.";
+    console.error("Lawyer Error Full Details:", error);
+    return "Ndodhi një gabim gjatë analizimit. Sigurohuni që dokumentet janë të lexueshme dhe që keni internet të qëndrueshëm.";
   }
 };

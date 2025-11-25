@@ -86,21 +86,25 @@ export const dbService = {
       // Përdorim array-n e importuar direkt. Nuk ka më fetch errors.
       const fileNames = lawList; 
 
-      if (!Array.isArray(fileNames) || fileNames.length === 0) {
-        console.log("Lista e ligjeve është bosh. Sigurohuni që keni bërë 'npm run generate'.");
+      if (!Array.isArray(fileNames)) {
+        console.log("Lista e ligjeve është bosh ose e pavlefshme.");
         return false;
       }
 
       const db = await getDB();
-      const existing = await db.getAllKeys('files');
-      
-      let count = 0;
       const tx = db.transaction('files', 'readwrite');
+      const store = tx.store;
       
+      const existingKeys = await store.getAllKeys();
+      
+      let addedCount = 0;
+      let deletedCount = 0;
+      
+      // 1. SHTO ligjet e reja
       for (const name of fileNames) {
           const id = name; 
-          if (!existing.includes(id)) {
-              await tx.store.put({
+          if (!existingKeys.includes(id)) {
+              await store.put({
                   id: id,
                   name: name,
                   type: 'application/pdf',
@@ -109,11 +113,25 @@ export const dbService = {
                   content: null, 
                   category: DocCategory.LAW_BASE
               });
-              count++;
+              addedCount++;
           }
       }
+
+      // 2. FSHI ligjet e vjetra (Clean up ghost files)
+      // Kontrollojmë çdo skedar në DB. Nëse është "LAW_BASE" dhe nuk është në listën e re, e fshijmë.
+      for (const key of existingKeys) {
+          const record = await store.get(key);
+          // Sigurohemi që të fshijmë vetëm ligjet automatike, jo dosjet e përdoruesit
+          if (record && record.category === DocCategory.LAW_BASE) {
+              if (!fileNames.includes(record.name)) {
+                  await store.delete(key);
+                  deletedCount++;
+              }
+          }
+      }
+
       await tx.done;
-      console.log(`Indeksi u përditësua. U shtuan ${count} rekorde metadata.`);
+      console.log(`Indeksi u përditësua: +${addedCount} të reja, -${deletedCount} të fshira.`);
       return true;
     } catch (error) {
       console.error("Gabim gjatë indeksimit:", error);
@@ -131,15 +149,17 @@ export const dbService = {
         }
 
         console.log(`Duke shkarkuar dokumentin: ${id}...`);
-        // Këtu fetch është OK sepse po kërkojmë PDF direkt, jo JSON
-        const res = await fetch(`/ligje/${id}`);
+        
+        // FIX: Encode the filename to handle spaces and special characters
+        const encodedId = encodeURIComponent(id);
+        
+        const res = await fetch(`/ligje/${encodedId}?v=${Date.now()}`);
         
         if (!res.ok) {
             console.error(`Serveri ktheu gabim për ${id}: ${res.status}`);
             throw new Error("File not found on server");
         }
         
-        // Sigurohemi që nuk morëm HTML gabimisht
         const contentType = res.headers.get("content-type");
         if (contentType && contentType.includes("text/html")) {
             throw new Error("Serveri ktheu HTML në vend të PDF.");
