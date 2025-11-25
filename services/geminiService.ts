@@ -49,6 +49,7 @@ export const consultLibrarian = async (
   // Send only names to save tokens and be fast
   const libraryManifest = availableLaws.map(l => `- ID: ${l.id}`).join('\n');
 
+  // Reduce complexity: Ask for Top 3 only
   const prompt = `
     You are the Head Librarian of a Law Firm.
     User Query: "${query}"
@@ -57,9 +58,10 @@ export const consultLibrarian = async (
     ${libraryManifest}
     
     Task: Identify exactly which documents from the list are strictly necessary to answer the query.
-    Return ONLY a JSON array of the file IDs (filenames). 
-    If the query is general greeting, return empty array.
-    Select max 5 most relevant documents.
+    Return ONLY a JSON array of the file IDs (filenames) strings.
+    Example: ["Kodi Civil.pdf", "Ligji nr 123.pdf"]
+    Select max 3 most relevant documents.
+    If no document matches, return empty array [].
   `;
 
   try {
@@ -68,28 +70,24 @@ export const consultLibrarian = async (
       contents: prompt,
       config: {
         responseMimeType: "application/json",
-        responseSchema: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING }
-        }
       }
     });
 
     let text = response.text;
     if (!text) return [];
 
-    // ZGJIDHJA PËRFUNDIMTARE E GABIMIT TE ANALIZËS
-    // Përdorim Regex për të gjetur vetëm pjesën e array-t JSON [...]
-    // Kjo injoron çdo tekst tjetër që AI mund të shtojë gabimisht.
-    const jsonMatch = text.match(/\[.*\]/s);
+    // PASTRIM AGRESIV I JSON
+    // 1. Hiq markdown code blocks
+    text = text.replace(/```json/g, '').replace(/```/g, '').trim();
     
-    if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]) as string[];
-    } else {
-        // Fallback nëse Regex dështon
-        text = text.replace(/```json\n?|```/g, '').trim();
-        return JSON.parse(text) as string[];
+    // 2. Gjej array-n me Regex nëse ka tekst shtesë
+    const match = text.match(/\[.*\]/s);
+    if (match) {
+        text = match[0];
     }
+
+    const result = JSON.parse(text);
+    return Array.isArray(result) ? result : [];
 
   } catch (error) {
     console.error("Librarian Error:", error);
@@ -117,14 +115,14 @@ export const consultLawyer = async (
       Ti je "Juristi im", një Konsulent i Lartë Ligjor AI ekspert.
       
       Konteksti:
-      1. Ti ke akses në "Dosjet e Çështjes" specifike të ofruara nga përdoruesi.
-      2. Ti ke akses në një "Bazë Ligjore" (ligje, kode) që janë gjetur si relevante për këtë kërkesë.
+      1. Ti ke akses në "Dosjet e Çështjes" (nese ka).
+      2. Ti ke akses në "Bazën Ligjore" (${relevantLaws.length} dokumente) qe jane zgjedhur per kete pyetje.
 
       Udhëzime:
       - Përgjigju profesionalisht në GJUHËN SHQIPE.
-      - Cito nenet specifike nga Baza Ligjore nëse është e mundur.
-      - Përdor formatim Markdown të pasur (bold, lista, tituj).
-      - Mos shpik ligje. Nëse dokumentet nuk mjaftojnë, thuaj që duhet më shumë informacion.
+      - Cito nenet specifike nga Baza Ligjore.
+      - Përdor formatim Markdown (bold, lista).
+      - Nëse dokumentet nuk mjaftojnë, përgjigju bazuar në njohuritë e tua të përgjithshme ligjore por theksoje këtë.
     `;
 
     const contents = [
@@ -154,6 +152,6 @@ export const consultLawyer = async (
     return response.text || "Nuk munda të gjeneroj përgjigje.";
   } catch (error) {
     console.error("Lawyer Error Full Details:", error);
-    return "Ndodhi një gabim gjatë analizimit. Sigurohuni që dokumentet janë të lexueshme dhe që keni internet të qëndrueshëm.";
+    return "Ndodhi një gabim gjatë analizimit. Kjo mund të ndodhë nëse dokumentet janë shumë të mëdha ose formati nuk mbështetet. Provoni të pyesni sërish.";
   }
 };

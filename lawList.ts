@@ -1,5 +1,3 @@
-// Ky skedar gjenerohet automatikisht nga "npm run generate"
-// Mos e ndrysho manualisht.
 export const lawList = [
   "1.Propozimi_i_gjithe_OSTve_per_nje_metodologji_te_ofrimit_te_dhenave_te_gjenerimit_dhe_ngarkeses_ne_perputhje_me_nenin.pdf",
   "162.1 rregullore mbi procedurat e konsultimit publik-finale.pdf",
