@@ -1,16 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <!-- Sfondi (Slate Dark) -->
   <circle cx="50" cy="50" r="50" fill="#020617"/>
-  
-  <!-- Peshorja (Amber Gold) -->
   <path d="M50 15V85" stroke="#fbbf24" stroke-width="6" stroke-linecap="round"/>
   <path d="M15 35L50 15L85 35" stroke="#fbbf24" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  
-  <!-- Tasat e peshores -->
   <path d="M15 35V52C15 62 30 62 30 62" stroke="#fbbf24" stroke-width="6" fill="none" stroke-linecap="round"/>
   <path d="M85 35V52C85 62 70 62 70 62" stroke="#fbbf24" stroke-width="6" fill="none" stroke-linecap="round"/>
-  
-  <!-- Baza -->
   <path d="M30 85H70" stroke="#fbbf24" stroke-width="6" stroke-linecap="round"/>
   <circle cx="50" cy="15" r="5" fill="#fbbf24"/>
 </svg>
