@@ -15,6 +15,7 @@ export const lawList = [
   "DPM_Kontrata_TIP.pdf",
   "Draft-Metodologjia_e_FMF_Gaz(17062021) (1).pdf",
   "Draft-Metodologjia_e_FMF_Gaz(17062021).pdf",
+  "E-drejta-e-detyrimeve-kontratat.pdf",
   "final_-_rregullorja_per_kushtet_e_sherbimit_fmf_-_per_QPZ (1).pdf",
   "final_-_rregullorja_per_kushtet_e_sherbimit_fmf_-_per_QPZ.pdf",
   "Formati_TIP_i_licenses_se_Furnizimit-1.pdf",
