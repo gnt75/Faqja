@@ -2,76 +2,72 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { StoredFile } from "../types";
 import { dbService } from "./dbService";
 
-const apiKey = import.meta.env.VITE_API_KEY;
-if (!apiKey) throw new Error("❌ Mungon VITE_API_KEY në Vercel.");
+const genAI = new GoogleGenerativeAI(import.meta.env.VITE_API_KEY);
 
-const genAI = new GoogleGenerativeAI(apiKey);
-const flash = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-const pro = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
-
-// Convert files to Gemini inline parts
-const filesToParts = async (files: StoredFile[]) => {
-  const parts = await Promise.all(files.map(async f => {
-    const blob = await dbService.getFileContent(f.id) ?? await dbService.hydrateFile(f.id);
-    if (!blob) return null;
-
-    const data = await dbService.blobToBase64(blob);
-    return { inlineData: { mimeType: f.type ?? "application/pdf", data } };
-  }));
-
-  return parts.filter(Boolean) as { inlineData: { mimeType: string; data: string } }[];
+export const askGemini = async (question: string): Promise<string> => {
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  const result = await model.generateContent(question);
+  return result.response.text();
 };
 
-// Extract text safely
-const extract = async (res: any) => (typeof res.text === "function" ? await res.text() : res.text);
+const fileToPart = async (file: StoredFile) => {
+  const blob = await dbService.hydrateFile(file.id);
+  const base64 = await dbService.blobToBase64(blob);
+  return {
+    inlineData: {
+      mimeType: file.type,
+      data: base64,
+    },
+  };
+};
 
-export const consultLibrarian = async (query: string, laws: StoredFile[]): Promise<string[]> => {
-  if (laws.length === 0) return [];
+export const consultLibrarian = async (
+  query: string,
+  availableLaws: StoredFile[]
+): Promise<string[]> => {
+  if (!availableLaws.length) return [];
 
-  const manifest = laws.map(l => `- ${l.id}`).join("\n");
   const prompt = `
-Ti je Arkivisti Ligjor.
-Kerkesa: "${query}"
+  You are a legal librarian AI. Select up to 3 relevant documents from:
+  ${availableLaws.map((l) => l.id).join("\n")}
+  Return ONLY a JSON array of filenames, e.g. ["Kodi Penal.pdf"]
+  Query: ${query}`;
 
-Dokumentet në dispozicion:
-${manifest}
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  const result = await model.generateContent(prompt);
+  const text = result.response.text().trim();
 
-Kthe vetëm një JSON array
-p.sh. ["Kodi Penal.pdf", "Ligji 8438.pdf"]
-`;
-
-  const res = await flash.generateContent(prompt);
-  const text = (await extract(res)).replace(/```json|```/g, "").trim();
   try {
-    const arr = JSON.parse(text.match(/\[.*\]/s)?.[0] ?? "[]");
-    return Array.isArray(arr) ? arr : [];
+    return JSON.parse(text.match(/\[.*\]/s)?.[0] || "[]");
   } catch {
     return [];
   }
 };
 
 export const consultLawyer = async (
-  query: string,
+  question: string,
   caseFiles: StoredFile[],
   laws: StoredFile[],
   history: string
 ): Promise<string> => {
-  const caseParts = await filesToParts(caseFiles);
-  const lawParts = await filesToParts(laws);
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-  const prompt = `
-Ti je "Juristi im".
-Historia: ${history}
-Pyetja: ${query}
-`;
+  const caseParts = await Promise.all(caseFiles.map(fileToPart));
+  const lawParts = await Promise.all(laws.map(fileToPart));
 
-  const res = await pro.generateContent({
+  const result = await model.generateContent({
     contents: [
-      { text: prompt },
-      ...caseParts,
-      ...lawParts
-    ]
+      {
+        role: "user",
+        parts: [
+          ...caseParts,
+          ...lawParts,
+          { text: `History:\n${history}\nQuestion:\n${question}` },
+        ],
+      },
+    ],
+    generationConfig: { temperature: 0.3 },
   });
 
-  return (await extract(res)) ?? "Nuk gjeta dot përgjigje.";
+  return result.response.text();
 };
