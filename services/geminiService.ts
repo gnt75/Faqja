@@ -3,16 +3,15 @@ import { StoredFile } from "../types";
 import { dbService } from "./dbService";
 
 const getAI = () => {
-    return new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
-};
-
+  const apiKey = import.meta.env.VITE_API_KEY;
   if (!apiKey) {
-    console.error("❌ Mungon VITE_GEMINI_API_KEY në environment.");
+    console.error("❌ Mungon VITE_API_KEY në environment.");
     throw new Error("Mungon konfigurimi i Gemini API key.");
   }
 
-  return new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
+  return new GoogleGenAI({ apiKey });
 };
+
 
 // Helper to convert stored blobs to Gemini parts
 const filesToParts = async (files: StoredFile[]) => {
