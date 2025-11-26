@@ -1,0 +1,12 @@
+{
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "rewrites": [
+    {
+      "source": "/ligje/(.*)",
+      "destination": "/ligje/$1"
+    }
+  ],
+  "redirects": [],
+  "headers": []
+}
