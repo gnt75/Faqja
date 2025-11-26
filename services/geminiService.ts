@@ -1,62 +1,77 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import { StoredFile } from "../types";
 import { dbService } from "./dbService";
 
 const getAI = () => {
-    return new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+
+  if (!apiKey) {
+    console.error("❌ Mungon VITE_GEMINI_API_KEY në environment.");
+    throw new Error("Mungon konfigurimi i Gemini API key.");
+  }
+
+  return new GoogleGenAI({ apiKey });
 };
 
 // Helper to convert stored blobs to Gemini parts
-// Optimized: Downloads all missing files in parallel
 const filesToParts = async (files: StoredFile[]) => {
   const promises = files.map(async (file) => {
     try {
-      // IMPORTANT: Check if content exists, if not, hydrate (download) it
+      // 1) provo ta marrësh nga IndexedDB
       let blob = await dbService.getFileContent(file.id);
-      
+
+      // 2) nëse mungon, shkarko nga /ligje (hydrateFile)
       if (!blob) {
-          // If it's a known law from our static list (id matches name), try to download it now
-          blob = await dbService.hydrateFile(file.id);
+        blob = await dbService.hydrateFile(file.id);
       }
 
       if (blob) {
         const base64 = await dbService.blobToBase64(blob);
         return {
           inlineData: {
-            mimeType: file.type || 'application/pdf',
-            data: base64
-          }
+            mimeType: file.type || "application/pdf",
+            data: base64,
+          },
         };
       }
     } catch (e) {
-      console.error(`Failed to prepare file ${file.name} for AI:`, e);
+      console.error(`❌ Failed to prepare file ${file.name} for AI:`, e);
     }
     return null;
   });
 
   const results = await Promise.all(promises);
-  return results.filter((part): part is { inlineData: { mimeType: string; data: string } } => part !== null);
+  return results.filter(
+    (part): part is { inlineData: { mimeType: string; data: string } } =>
+      part !== null
+  );
+};
+
+const extractText = (response: any): string | undefined => {
+  if (!response) return;
+  if (typeof response.text === "function") {
+    return response.text();
+  }
+  return response.text;
 };
 
 export const consultLibrarian = async (
-  query: string, 
+  query: string,
   availableLaws: StoredFile[]
 ): Promise<string[]> => {
   if (availableLaws.length === 0) return [];
 
   const ai = getAI();
-  
-  // Send only names to save tokens and be fast
-  const libraryManifest = availableLaws.map(l => `- ID: ${l.id}`).join('\n');
 
-  // Reduce complexity: Ask for Top 3 only
+  const libraryManifest = availableLaws.map((l) => `- ID: ${l.id}`).join("\n");
+
   const prompt = `
     You are the Head Librarian of a Law Firm.
     User Query: "${query}"
-    
+
     Available Legal Documents (Filenames):
     ${libraryManifest}
-    
+
     Task: Identify exactly which documents from the list are strictly necessary to answer the query.
     Return ONLY a JSON array of the file IDs (filenames) strings.
     Example: ["Kodi Civil.pdf", "Ligji nr 123.pdf"]
@@ -66,31 +81,29 @@ export const consultLibrarian = async (
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-1.5-flash",
+      model: "gemini-1.5-flash-latest",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
-      }
+      },
     });
 
-    let text = response.text;
+    let text = extractText(response);
     if (!text) return [];
 
-    // PASTRIM AGRESIV I JSON
-    // 1. Hiq markdown code blocks
-    text = text.replace(/```json/g, '').replace(/```/g, '').trim();
-    
-    // 2. Gjej array-n me Regex nëse ka tekst shtesë
+    // 1) hiq ```json ... ```
+    text = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+
+    // 2) nxirr vetëm array-n nëse ka tekst shtesë
     const match = text.match(/\[.*\]/s);
     if (match) {
-        text = match[0];
+      text = match[0];
     }
 
     const result = JSON.parse(text);
     return Array.isArray(result) ? result : [];
-
   } catch (error) {
-    console.error("Librarian Error:", error);
+    console.error("📚 Librarian Error:", error);
     return [];
   }
 };
@@ -104,54 +117,55 @@ export const consultLawyer = async (
   const ai = getAI();
 
   try {
-    // 1. Prepare Case Files
     const caseFileParts = await filesToParts(caseFiles);
-
-    // 2. Prepare Law Files (This triggers download if missing)
     const lawFileParts = await filesToParts(relevantLaws);
 
-    // 3. Construct System Instruction
     const systemInstruction = `
       Ti je "Juristi im", një Konsulent i Lartë Ligjor AI ekspert.
-      
+
       Konteksti:
-      1. Ti ke akses në "Dosjet e Çështjes" (nese ka).
-      2. Ti ke akses në "Bazën Ligjore" (${relevantLaws.length} dokumente) qe jane zgjedhur per kete pyetje.
+      1. Ti ke akses në "Dosjet e Çështjes" (nëse ka).
+      2. Ti ke akses në "Bazën Ligjore" (${relevantLaws.length} dokumente) që janë zgjedhur për këtë pyetje.
 
       Udhëzime:
       - Përgjigju profesionalisht në GJUHËN SHQIPE.
-      - Cito nenet specifike nga Baza Ligjore.
+      - Cito nenet specifike nga Baza Ligjore kur është e mundur.
       - Përdor formatim Markdown (bold, lista).
-      - Nëse dokumentet nuk mjaftojnë, përgjigju bazuar në njohuritë e tua të përgjithshme ligjore por theksoje këtë.
+      - Nëse dokumentet nuk mjaftojnë, përgjigju bazuar në njohuritë e tua të përgjithshme ligjore dhe theksoje këtë.
     `;
 
-    const contents = [
-      ...caseFileParts, 
-      ...lawFileParts,  
-      { text: `Konteksti i Bisedës:\n${chatHistory}\n\nPyetja Aktuale: ${query}` }
-    ];
-
-    console.log(`Sending to AI: ${caseFileParts.length} case files, ${lawFileParts.length} law files.`);
+    const userParts = [
+      ...caseFileParts,
+      ...lawFileParts,
+      {
+        text: `Konteksti i Bisedës:\n${chatHistory}\n\nPyetja Aktuale: ${query}`,
+      },
+    ].map((c) =>
+      "inlineData" in c
+        ? c
+        : {
+            text: (c as any).text,
+          }
+    );
 
     const response = await ai.models.generateContent({
-      model: "gemini-1.5-flash",
-      contents: {
-        parts: contents.map(c => {
-          if ('inlineData' in c) {
-            return c;
-          }
-          return { text: c.text };
-        })
-      },
+      model: "gemini-1.5-flash-latest",
+      contents: [
+        {
+          role: "user",
+          parts: userParts,
+        },
+      ],
       config: {
-        systemInstruction: systemInstruction,
+        systemInstruction,
         temperature: 0.3,
-      }
+      },
     });
 
-    return response.text || "Nuk munda të gjeneroj përgjigje.";
+    const text = extractText(response);
+    return text || "Nuk munda të gjeneroj përgjigje.";
   } catch (error) {
-    console.error("Lawyer Error Full Details:", error);
-    return "Ndodhi një gabim gjatë analizimit. Kjo mund të ndodhë nëse dokumentet janë shumë të mëdha ose formati nuk mbështetet. Provoni të pyesni sërish.";
+    console.error("⚖️ Lawyer Error Full Details:", error);
+    return "Ndodhi një gabim gjatë analizimit. Kjo mund të ndodhë nëse dokumentet janë shumë të mëdha, formati nuk mbështetet ose ka problem me lidhjen me shërbimin AI. Provoni të pyesni sërish ose kontaktoni suportin.";
   }
 };
