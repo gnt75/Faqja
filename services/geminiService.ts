@@ -3,7 +3,8 @@ import { StoredFile } from "../types";
 import { dbService } from "./dbService";
 
 const getAI = () => {
-  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+    return new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
+};
 
   if (!apiKey) {
     console.error("❌ Mungon VITE_GEMINI_API_KEY në environment.");
