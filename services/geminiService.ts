@@ -10,7 +10,7 @@ const getAI = () => {
     throw new Error("Mungon konfigurimi i Gemini API key.");
   }
 
-  return new GoogleGenAI({ apiKey });
+  return new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
 };
 
 // Helper to convert stored blobs to Gemini parts
