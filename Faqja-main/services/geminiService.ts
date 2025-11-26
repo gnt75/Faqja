@@ -2,86 +2,76 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { StoredFile } from "../types";
 import { dbService } from "./dbService";
 
-const getAI = () => {
-  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-  if (!apiKey) throw new Error("❌ Mungon VITE_GEMINI_API_KEY");
-  return new GoogleGenerativeAI(apiKey);
-};
+const apiKey = import.meta.env.VITE_API_KEY;
+if (!apiKey) throw new Error("❌ Mungon VITE_API_KEY në Vercel.");
 
-const extractText = (resp: any): string => {
-  if (!resp) return "";
-  if (typeof resp.text === "function") return resp.text();
-  return resp.text ?? "";
-};
+const genAI = new GoogleGenerativeAI(apiKey);
+const flash = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+const pro = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
 
+// Convert files to Gemini inline parts
 const filesToParts = async (files: StoredFile[]) => {
-  const out: any[] = [];
-  for (const f of files) {
-    let blob = await dbService.getFileContent(f.id);
-    if (!blob) blob = await dbService.hydrateFile(f.id);
-    if (!blob) continue;
-    const base64 = await dbService.blobToBase64(blob);
-    out.push({
-      inlineData: { mimeType: f.type || "application/pdf", data: base64 },
-    });
-  }
-  return out;
+  const parts = await Promise.all(files.map(async f => {
+    const blob = await dbService.getFileContent(f.id) ?? await dbService.hydrateFile(f.id);
+    if (!blob) return null;
+
+    const data = await dbService.blobToBase64(blob);
+    return { inlineData: { mimeType: f.type ?? "application/pdf", data } };
+  }));
+
+  return parts.filter(Boolean) as { inlineData: { mimeType: string; data: string } }[];
 };
 
-/* ==========  1) CONSULT LIBRARIAN  ========== */
-export const consultLibrarian = async (query: string, laws: StoredFile[]) => {
-  if (!laws.length) return [];
-  const ai = getAI();
+// Extract text safely
+const extract = async (res: any) => (typeof res.text === "function" ? await res.text() : res.text);
+
+export const consultLibrarian = async (query: string, laws: StoredFile[]): Promise<string[]> => {
+  if (laws.length === 0) return [];
+
+  const manifest = laws.map(l => `- ${l.id}`).join("\n");
   const prompt = `
-    You are a legal librarian.
-    User question: "${query}"
-    Files available:
-    ${laws.map(l => l.id).join("\n")}
-    Return a JSON array of max 3 filenames that are relevant.
-  `;
+Ti je Arkivisti Ligjor.
+Kerkesa: "${query}"
 
-  const result = await ai.run({
-    model: "gemini-1.5-flash",
-    prompt,
-    responseMimeType: "application/json"
-  });
+Dokumentet në dispozicion:
+${manifest}
 
-  const txt = extractText(result);
+Kthe vetëm një JSON array
+p.sh. ["Kodi Penal.pdf", "Ligji 8438.pdf"]
+`;
+
+  const res = await flash.generateContent(prompt);
+  const text = (await extract(res)).replace(/```json|```/g, "").trim();
   try {
-    const arr = JSON.parse(txt);
+    const arr = JSON.parse(text.match(/\[.*\]/s)?.[0] ?? "[]");
     return Array.isArray(arr) ? arr : [];
   } catch {
     return [];
   }
 };
 
-/* ==========  2) CONSULT LAWYER  ========== */
 export const consultLawyer = async (
   query: string,
   caseFiles: StoredFile[],
   laws: StoredFile[],
   history: string
-) => {
-  const ai = getAI();
+): Promise<string> => {
   const caseParts = await filesToParts(caseFiles);
   const lawParts = await filesToParts(laws);
 
-  const response = await ai.run({
-    model: "gemini-1.5-flash-latest",
-    systemInstruction: `
-      Ti je një jurist AI.
-      Përgjigju shqip, qartë dhe me referenca ligjore kur të jetë e mundur.
-    `,
-    input: [
+  const prompt = `
+Ti je "Juristi im".
+Historia: ${history}
+Pyetja: ${query}
+`;
+
+  const res = await pro.generateContent({
+    contents: [
+      { text: prompt },
       ...caseParts,
-      ...lawParts,
-      { text: `Historik:\n${history}\nPyetja: ${query}` }
-    ],
-    temperature: 0.3
+      ...lawParts
+    ]
   });
 
-  return extractText(response) || "Nuk u gjenerua përgjigje.";
+  return (await extract(res)) ?? "Nuk gjeta dot përgjigje.";
 };
-
-/* ==========  3) Wrapper për App.tsx  ========== */
-export const askGemini = consultLawyer;
