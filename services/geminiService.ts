@@ -2,50 +2,52 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { StoredFile } from "../types";
 import { dbService } from "./dbService";
 
-/* ---------------------------------------------------
-   INITIALIZATION
----------------------------------------------------- */
 const getAI = () => {
   const apiKey = import.meta.env.VITE_API_KEY;
   if (!apiKey) {
     console.error("❌ Mungon VITE_API_KEY në environment.");
     throw new Error("Mungon konfigurimi i Gemini API key.");
   }
+
   return new GoogleGenerativeAI(apiKey);
 };
 
-/* ---------------------------------------------------
-   CONVERT FILES → GEMINI PARTS
----------------------------------------------------- */
+// Convert files to Gemini inline parts
 const filesToParts = async (files: StoredFile[]) => {
-  const results = await Promise.all(
-    files.map(async (file) => {
-      try {
-        let blob = await dbService.getFileContent(file.id);
-        if (!blob) blob = await dbService.hydrateFile(file.id);
+  const parts = await Promise.all(files.map(async (file) => {
+    try {
+      let blob = await dbService.getFileContent(file.id);
+      if (!blob) blob = await dbService.hydrateFile(file.id);
+      if (!blob) return null;
 
-        if (!blob) return null;
+      const base64 = await dbService.blobToBase64(blob);
+      return {
+        inlineData: {
+          mimeType: file.type || "application/pdf",
+          data: base64,
+        },
+      };
+    } catch (err) {
+      console.error("❌ File conversion error:", file.id, err);
+      return null;
+    }
+  }));
 
-        const base64 = await dbService.blobToBase64(blob);
-        return {
-          inlineData: {
-            mimeType: file.type || "application/pdf",
-            data: base64,
-          },
-        };
-      } catch (err) {
-        console.error(`❌ Failed to load file ${file.name}`, err);
-        return null;
-      }
-    })
-  );
-
-  return results.filter((x): x is any => x !== null);
+  return parts.filter((p) => p !== null) as any[];
 };
 
-/* ---------------------------------------------------
-   LIBRARIAN (Select Top Relevant Laws)
----------------------------------------------------- */
+// Safe extractor for Gemini responses
+const extractText = (res: any): string | undefined => {
+  try {
+    return typeof res.text === "function" ? res.text() : res.text;
+  } catch {
+    return undefined;
+  }
+};
+
+// -----------------------------------------------
+// LIBRARIAN
+// -----------------------------------------------
 export const consultLibrarian = async (
   query: string,
   availableLaws: StoredFile[]
@@ -58,37 +60,35 @@ export const consultLibrarian = async (
   const manifest = availableLaws.map((l) => `- ${l.id}`).join("\n");
 
   const prompt = `
-Head Librarian Mode.
-User Question: "${query}"
+    You are a Legal Librarian AI.
+    User query: "${query}"
 
-Available PDFs:
-${manifest}
+    Documents:
+    ${manifest}
 
-Pick MAX 3 filenames that are required to answer the query.
-Return ONLY a JSON array of exact filenames.
-Example: ["Kodi Civil.pdf"]
-If none match, return [].
-`;
+    Return ONLY a JSON array of filenames.
+  `;
 
   try {
     const result = await model.generateContent(prompt);
-    let text = result.response.text();
+    let text = extractText(result);
 
-    text = text.replace(/```json|```/gi, "").trim();
+    if (!text) return [];
+
+    text = text.replace(/```json/g, "").replace(/```/g, "").trim();
     const match = text.match(/\[.*\]/s);
     if (match) text = match[0];
 
-    const parsed = JSON.parse(text);
-    return Array.isArray(parsed) ? parsed : [];
+    return JSON.parse(text);
   } catch (err) {
-    console.error("📚 Librarian Error:", err);
+    console.error("📚 Librarian error:", err);
     return [];
   }
 };
 
-/* ---------------------------------------------------
-   LAWYER — Full Legal Reasoning
----------------------------------------------------- */
+// -----------------------------------------------
+// LAWYER
+// -----------------------------------------------
 export const consultLawyer = async (
   query: string,
   caseFiles: StoredFile[],
@@ -103,25 +103,27 @@ export const consultLawyer = async (
     const lawParts = await filesToParts(relevantLaws);
 
     const systemInstruction = `
-Ti je "Juristi im", një avokat AI shumë i aftë.
-Përdor dokumentet, cito nenet, dhe përgjigju vetëm në shqip.
-`;
+      Ti je "Juristi im", ekspert ligjor AI.
+      - Përgjigju në shqip.
+      - Cito nenet kur është e mundur.
+      - Përdor Markdown.
+    `;
 
-    const userParts = [
+    const contents = [
       ...caseParts,
       ...lawParts,
       {
-        text: `CHAT HISTORY:\n${chatHistory}\n\nPYETJA: ${query}`,
+        text: `Chat History:\n${chatHistory}\n\nPyetja: ${query}`,
       },
     ];
 
     const result = await model.generateContent({
-      contents: [{ role: "user", parts: userParts }],
+      contents,
       systemInstruction,
-      generationConfig: { temperature: 0.3 },
+      temperature: 0.3,
     });
 
-    return result.response.text() || "Nuk ka përgjigje.";
+    return extractText(result) || "Nuk munda të gjeneroj përgjigje.";
   } catch (err) {
     console.error("⚖️ Lawyer Error:", err);
     return "Ndodhi një gabim gjatë analizimit.";
