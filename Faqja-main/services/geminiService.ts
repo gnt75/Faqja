@@ -1,37 +1,87 @@
-import { GoogleGenerativeAI, GenerativeModel } from "@google/generative-ai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { StoredFile } from "../types";
+import { dbService } from "./dbService";
 
-const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
+const getAI = () => {
+  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+  if (!apiKey) throw new Error("❌ Mungon VITE_GEMINI_API_KEY");
+  return new GoogleGenerativeAI(apiKey);
+};
 
-// Model bazë
-const model: GenerativeModel = genAI.getGenerativeModel({ model: "gemini-pro" });
+const extractText = (resp: any): string => {
+  if (!resp) return "";
+  if (typeof resp.text === "function") return resp.text();
+  return resp.text ?? "";
+};
 
-// START CHAT
-export async function sendMessage(message: string) {
-  try {
-    const chat = model.startChat({
-      history: [],
-      generationConfig: {
-        maxOutputTokens: 2048,
-        temperature: 0.3
-      }
+const filesToParts = async (files: StoredFile[]) => {
+  const out: any[] = [];
+  for (const f of files) {
+    let blob = await dbService.getFileContent(f.id);
+    if (!blob) blob = await dbService.hydrateFile(f.id);
+    if (!blob) continue;
+    const base64 = await dbService.blobToBase64(blob);
+    out.push({
+      inlineData: { mimeType: f.type || "application/pdf", data: base64 },
     });
-
-    const result = await chat.sendMessage(message);
-    const response = await result.response;
-    return response.text();
-  } catch (err) {
-    console.error("Gemini error:", err);
-    return "Pata një problem gjatë përpunimit të kërkesës suaj. Ju lutem provoni përsëri.";
   }
-}
+  return out;
+};
 
-// GENERATE TEXT DIRECT
-export async function ask(text: string) {
+/* ==========  1) CONSULT LIBRARIAN  ========== */
+export const consultLibrarian = async (query: string, laws: StoredFile[]) => {
+  if (!laws.length) return [];
+  const ai = getAI();
+  const prompt = `
+    You are a legal librarian.
+    User question: "${query}"
+    Files available:
+    ${laws.map(l => l.id).join("\n")}
+    Return a JSON array of max 3 filenames that are relevant.
+  `;
+
+  const result = await ai.run({
+    model: "gemini-1.5-flash",
+    prompt,
+    responseMimeType: "application/json"
+  });
+
+  const txt = extractText(result);
   try {
-    const result = await model.generateContent(text);
-    return result.response.text();
-  } catch (err) {
-    console.error("Gemini error:", err);
-    return "Kërkesa nuk u procesua.";
+    const arr = JSON.parse(txt);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
   }
-}
+};
+
+/* ==========  2) CONSULT LAWYER  ========== */
+export const consultLawyer = async (
+  query: string,
+  caseFiles: StoredFile[],
+  laws: StoredFile[],
+  history: string
+) => {
+  const ai = getAI();
+  const caseParts = await filesToParts(caseFiles);
+  const lawParts = await filesToParts(laws);
+
+  const response = await ai.run({
+    model: "gemini-1.5-flash-latest",
+    systemInstruction: `
+      Ti je një jurist AI.
+      Përgjigju shqip, qartë dhe me referenca ligjore kur të jetë e mundur.
+    `,
+    input: [
+      ...caseParts,
+      ...lawParts,
+      { text: `Historik:\n${history}\nPyetja: ${query}` }
+    ],
+    temperature: 0.3
+  });
+
+  return extractText(response) || "Nuk u gjenerua përgjigje.";
+};
+
+/* ==========  3) Wrapper për App.tsx  ========== */
+export const askGemini = consultLawyer;
