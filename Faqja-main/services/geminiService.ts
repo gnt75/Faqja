@@ -2,72 +2,101 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { StoredFile } from "../types";
 import { dbService } from "./dbService";
 
-const genAI = new GoogleGenerativeAI(import.meta.env.VITE_API_KEY);
-
-export const askGemini = async (question: string): Promise<string> => {
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-  const result = await model.generateContent(question);
-  return result.response.text();
+const getAI = () => {
+  const apiKey = import.meta.env.VITE_API_KEY;
+  if (!apiKey) {
+    console.error("❌ Mungon VITE_API_KEY në environment.");
+    throw new Error("Mungon konfigurimi i Gemini API key.");
+  }
+  return new GoogleGenerativeAI(apiKey);
 };
 
-const fileToPart = async (file: StoredFile) => {
-  const blob = await dbService.hydrateFile(file.id);
-  const base64 = await dbService.blobToBase64(blob);
-  return {
-    inlineData: {
-      mimeType: file.type,
-      data: base64,
-    },
-  };
+// KONVERTON FILET NË PARTS PËR GEMINI
+const filesToParts = async (files: StoredFile[]) => {
+  const out: any[] = [];
+  for (const file of files) {
+    let blob = await dbService.getFileContent(file.id);
+    if (!blob) blob = await dbService.hydrateFile(file.id);
+    if (!blob) continue;
+
+    const base64 = await dbService.blobToBase64(blob);
+    out.push({
+      inlineData: {
+        mimeType: file.type || "application/pdf",
+        data: base64,
+      }
+    });
+  }
+  return out;
 };
 
+// NXJERR TEKSTIN NGA PËRGJIGJA
+const extractText = async (response: any): Promise<string> => {
+  try {
+    return (await response.response.text()) ?? "";
+  } catch {
+    return "";
+  }
+};
+
+// ------------------ LIBRARIAN ------------------
 export const consultLibrarian = async (
   query: string,
   availableLaws: StoredFile[]
 ): Promise<string[]> => {
   if (!availableLaws.length) return [];
 
-  const prompt = `
-  You are a legal librarian AI. Select up to 3 relevant documents from:
-  ${availableLaws.map((l) => l.id).join("\n")}
-  Return ONLY a JSON array of filenames, e.g. ["Kodi Penal.pdf"]
-  Query: ${query}`;
+  const ai = getAI();
+  const model = ai.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-  const result = await model.generateContent(prompt);
-  const text = result.response.text().trim();
+  const manifest = availableLaws.map(l => `- ${l.id}`).join("\n");
+
+  const prompt = `
+  You are the Head Librarian of a Law Firm.
+  Query: "${query}"
+  Available documents:
+  ${manifest}
+  Return a JSON array of up to 3 filenames relevant to the query.
+  If none, return [].
+  `;
 
   try {
-    return JSON.parse(text.match(/\[.*\]/s)?.[0] || "[]");
-  } catch {
+    const result = await model.generateContent(prompt);
+    const raw = await extractText(result);
+
+    const match = raw.match(/\[.*\]/s);
+    return match ? JSON.parse(match[0]) : [];
+  } catch (e) {
+    console.error("📚 Librarian Error:", e);
     return [];
   }
 };
 
+// ------------------ LAWYER ------------------
 export const consultLawyer = async (
-  question: string,
+  query: string,
   caseFiles: StoredFile[],
-  laws: StoredFile[],
+  relevantLaws: StoredFile[],
   history: string
 ): Promise<string> => {
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  const ai = getAI();
+  const model = ai.getGenerativeModel({ model: "gemini-1.5-pro" });
 
-  const caseParts = await Promise.all(caseFiles.map(fileToPart));
-  const lawParts = await Promise.all(laws.map(fileToPart));
+  try {
+    const parts = [
+      ...await filesToParts(caseFiles),
+      ...await filesToParts(relevantLaws),
+      { text: `Konteksti: ${history}\nPyetja: ${query}` }
+    ];
 
-  const result = await model.generateContent({
-    contents: [
-      {
-        role: "user",
-        parts: [
-          ...caseParts,
-          ...lawParts,
-          { text: `History:\n${history}\nQuestion:\n${question}` },
-        ],
-      },
-    ],
-    generationConfig: { temperature: 0.3 },
-  });
+    const response = await model.generateContent({
+      contents: [{ role: "user", parts }],
+    });
 
-  return result.response.text();
+    const out = await extractText(response);
+    return out || "Nuk munda të gjeneroj një përgjigje.";
+  } catch (e) {
+    console.error("⚖️ Lawyer Error:", e);
+    return "Ndodhi një gabim gjatë analizimit. Provoni sërish.";
+  }
 };
