@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Scale, Upload, Trash2, Send, FileText, Book, Menu, X, LogOut, Lock, Unlock, Loader2, Crown } from 'lucide-react';
 import { DocCategory, StoredFile, Message, UserProfile } from './types';
 import { dbService } from './services/dbService';
-import { consultLibrarian, consultLawyer } from './services/geminiService';
+import { consultLibrarian, consultLawyer } from "./services/geminiService";
 import ChatMessageBubble from './components/ChatMessageBubble';
 import CloudImporter from './components/CloudImporter';
 import Login from './components/Login';
@@ -243,7 +243,7 @@ const App = () => {
       
       setProcessingStep(`Duke analizuar çështjen bazuar në ${relevantLaws.length} ligje të gjetura...`);
       const historyText = messages.slice(-4).map(m => `${m.role}: ${m.content}`).join('\n');
-      const answer = await consultLawyer(userMsg.content, caseFiles, relevantLaws, historyText);
+      const answer = await askGemini(userMsg.content, caseFiles, relevantLaws, historyText);
 
       const aiMsg: Message = {
         id: crypto.randomUUID(),

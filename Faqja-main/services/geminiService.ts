@@ -1,106 +1,92 @@
-import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from "@google/generative-ai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { StoredFile } from "../types";
 import { dbService } from "./dbService";
 
-const genAI = new GoogleGenerativeAI(import.meta.env.VITE_API_KEY);
-
-/* -------------------------------- HELPERS -------------------------------- */
-
-const extractText = async (response: any): Promise<string> => {
-  const out = await response.response.text();
-  return out ?? "";
+const getAI = () => {
+  const key = import.meta.env.VITE_GEMINI_API_KEY;
+  if (!key) throw new Error("❌ Mungon VITE_GEMINI_API_KEY");
+  return new GoogleGenerativeAI(key);
 };
 
-const fileToPart = async (file: StoredFile) => {
-  try {
-    let blob = await dbService.getFileContent(file.id);
-    if (!blob) blob = await dbService.hydrateFile(file.id);
-    if (!blob) return null;
+// ===== Helper për file =====
+const filesToParts = async (files: StoredFile[]) => {
+  const result = [];
+  for (const f of files) {
+    let blob = await dbService.getFileContent(f.id);
+    if (!blob) blob = await dbService.hydrateFile(f.id);
+    if (!blob) continue;
 
-    const b64 = await dbService.blobToBase64(blob);
-
-    return {
-      inlineData: { mimeType: file.type || "application/pdf", data: b64 },
-    };
-  } catch (e) {
-    console.error("File conversion error:", e);
-    return null;
+    const base64 = await dbService.blobToBase64(blob);
+    result.push({
+      inlineData: {
+        mimeType: f.type || "application/pdf",
+        data: base64,
+      },
+    });
   }
+  return result;
 };
 
-/* ------------------------------ LIBRARIAN AI ------------------------------ */
-
+// ===== Librarian =====
 export const consultLibrarian = async (
   query: string,
-  laws: StoredFile[]
+  availableLaws: StoredFile[]
 ): Promise<string[]> => {
-  if (!laws.length) return [];
+  if (!availableLaws.length) return [];
 
-  const manifest = laws.map((l) => `- ${l.id}`).join("\n");
+  const ai = getAI();
+  const manifest = availableLaws.map(l => `- ${l.id}`).join("\n");
 
   const prompt = `
-Ti je Arkivisti Kryesor i një Zyre Ligjore.
-Pyetja e përdoruesit: "${query}"
+  You are a Legal Librarian.
+  User query: "${query}"
+  Available documents:
+  ${manifest}
+  Return a JSON list of filenames (max 3) or [] if none match.
+  `;
 
-Dokumentet në dispozicion:
-${manifest}
+  const res = await ai.generateContent({
+    model: "gemini-1.5-flash",
+    contents: [{ parts: [{ text: prompt }] }],
+  });
 
-Detyrë:
-Zgjidh maksimumi 3 dokumente që DUHEN lexuar për të përgjigjur pyetjes.
-Kthe vetëm një JSON array të tillë: ["Kodi Civil.pdf", "Ligji XXX.pdf"]
-Nëse asnjë dokument nuk është relevant, kthe [].
-`;
-
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-  const result = await model.generateContent(prompt);
-  const txt = await extractText(result);
-
-  try {
-    const match = txt.match(/\[.*\]/s);
-    return match ? JSON.parse(match[0]) : [];
-  } catch {
-    return [];
-  }
+  const text = res.response.text().trim();
+  const match = text.match(/\[.*\]/s);
+  return match ? JSON.parse(match[0]) : [];
 };
 
-/* ------------------------------ LAWYER AI -------------------------------- */
-
+// ===== Lawyer =====
 export const consultLawyer = async (
   query: string,
   caseFiles: StoredFile[],
   laws: StoredFile[],
   history: string
 ): Promise<string> => {
-  const model = genAI.getGenerativeModel({
+  const ai = getAI();
+
+  const caseParts = await filesToParts(caseFiles);
+  const lawsParts = await filesToParts(laws);
+
+  const intro = `
+  Ti je "Juristi im".
+  Pyetja: ${query}
+  Historia:
+  ${history}
+  `;
+
+  const res = await ai.generateContent({
     model: "gemini-1.5-flash",
-    safetySettings: [
+    contents: [
       {
-        category: HarmCategory.HARM_CATEGORY_HARASSMENT,
-        threshold: HarmBlockThreshold.BLOCK_NONE,
+        parts: [
+          { text: intro },
+          ...caseParts.map(p => ({ inlineData: p.inlineData })),
+          ...lawsParts.map(p => ({ inlineData: p.inlineData })),
+        ],
       },
     ],
+    generationConfig: { temperature: 0.3 },
   });
 
-  const fileParts = (await Promise.all(caseFiles.map(fileToPart))).filter(Boolean);
-  const lawParts = (await Promise.all(laws.map(fileToPart))).filter(Boolean);
-
-  const finalPrompt = `
-Ti je "Juristi Im" – një ekspert ligjor shqiptar.
-Konteksti:
-${history}
-
-Pyetja: ${query}
-
-Udhëzime:
-- Përdor bazën ligjore nëse ekziston
-- Cito nenet e ligjit
-- Përdor tone profesionale
-`;
-
-  const response = await model.generateContent([
-    { role: "user", parts: [...fileParts, ...lawParts, { text: finalPrompt }] },
-  ]);
-
-  return await extractText(response);
+  return res.response.text();
 };
