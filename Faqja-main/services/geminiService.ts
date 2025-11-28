@@ -1,102 +1,106 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from "@google/generative-ai";
 import { StoredFile } from "../types";
 import { dbService } from "./dbService";
 
-const getAI = () => {
-  const apiKey = import.meta.env.VITE_API_KEY;
-  if (!apiKey) {
-    console.error("❌ Mungon VITE_API_KEY në environment.");
-    throw new Error("Mungon konfigurimi i Gemini API key.");
-  }
-  return new GoogleGenerativeAI(apiKey);
+const genAI = new GoogleGenerativeAI(import.meta.env.VITE_API_KEY);
+
+/* -------------------------------- HELPERS -------------------------------- */
+
+const extractText = async (response: any): Promise<string> => {
+  const out = await response.response.text();
+  return out ?? "";
 };
 
-// KONVERTON FILET NË PARTS PËR GEMINI
-const filesToParts = async (files: StoredFile[]) => {
-  const out: any[] = [];
-  for (const file of files) {
+const fileToPart = async (file: StoredFile) => {
+  try {
     let blob = await dbService.getFileContent(file.id);
     if (!blob) blob = await dbService.hydrateFile(file.id);
-    if (!blob) continue;
+    if (!blob) return null;
 
-    const base64 = await dbService.blobToBase64(blob);
-    out.push({
-      inlineData: {
-        mimeType: file.type || "application/pdf",
-        data: base64,
-      }
-    });
-  }
-  return out;
-};
+    const b64 = await dbService.blobToBase64(blob);
 
-// NXJERR TEKSTIN NGA PËRGJIGJA
-const extractText = async (response: any): Promise<string> => {
-  try {
-    return (await response.response.text()) ?? "";
-  } catch {
-    return "";
+    return {
+      inlineData: { mimeType: file.type || "application/pdf", data: b64 },
+    };
+  } catch (e) {
+    console.error("File conversion error:", e);
+    return null;
   }
 };
 
-// ------------------ LIBRARIAN ------------------
+/* ------------------------------ LIBRARIAN AI ------------------------------ */
+
 export const consultLibrarian = async (
   query: string,
-  availableLaws: StoredFile[]
+  laws: StoredFile[]
 ): Promise<string[]> => {
-  if (!availableLaws.length) return [];
+  if (!laws.length) return [];
 
-  const ai = getAI();
-  const model = ai.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-  const manifest = availableLaws.map(l => `- ${l.id}`).join("\n");
+  const manifest = laws.map((l) => `- ${l.id}`).join("\n");
 
   const prompt = `
-  You are the Head Librarian of a Law Firm.
-  Query: "${query}"
-  Available documents:
-  ${manifest}
-  Return a JSON array of up to 3 filenames relevant to the query.
-  If none, return [].
-  `;
+Ti je Arkivisti Kryesor i një Zyre Ligjore.
+Pyetja e përdoruesit: "${query}"
+
+Dokumentet në dispozicion:
+${manifest}
+
+Detyrë:
+Zgjidh maksimumi 3 dokumente që DUHEN lexuar për të përgjigjur pyetjes.
+Kthe vetëm një JSON array të tillë: ["Kodi Civil.pdf", "Ligji XXX.pdf"]
+Nëse asnjë dokument nuk është relevant, kthe [].
+`;
+
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+  const result = await model.generateContent(prompt);
+  const txt = await extractText(result);
 
   try {
-    const result = await model.generateContent(prompt);
-    const raw = await extractText(result);
-
-    const match = raw.match(/\[.*\]/s);
+    const match = txt.match(/\[.*\]/s);
     return match ? JSON.parse(match[0]) : [];
-  } catch (e) {
-    console.error("📚 Librarian Error:", e);
+  } catch {
     return [];
   }
 };
 
-// ------------------ LAWYER ------------------
+/* ------------------------------ LAWYER AI -------------------------------- */
+
 export const consultLawyer = async (
   query: string,
   caseFiles: StoredFile[],
-  relevantLaws: StoredFile[],
+  laws: StoredFile[],
   history: string
 ): Promise<string> => {
-  const ai = getAI();
-  const model = ai.getGenerativeModel({ model: "gemini-1.5-pro" });
+  const model = genAI.getGenerativeModel({
+    model: "gemini-1.5-flash",
+    safetySettings: [
+      {
+        category: HarmCategory.HARM_CATEGORY_HARASSMENT,
+        threshold: HarmBlockThreshold.BLOCK_NONE,
+      },
+    ],
+  });
 
-  try {
-    const parts = [
-      ...await filesToParts(caseFiles),
-      ...await filesToParts(relevantLaws),
-      { text: `Konteksti: ${history}\nPyetja: ${query}` }
-    ];
+  const fileParts = (await Promise.all(caseFiles.map(fileToPart))).filter(Boolean);
+  const lawParts = (await Promise.all(laws.map(fileToPart))).filter(Boolean);
 
-    const response = await model.generateContent({
-      contents: [{ role: "user", parts }],
-    });
+  const finalPrompt = `
+Ti je "Juristi Im" – një ekspert ligjor shqiptar.
+Konteksti:
+${history}
 
-    const out = await extractText(response);
-    return out || "Nuk munda të gjeneroj një përgjigje.";
-  } catch (e) {
-    console.error("⚖️ Lawyer Error:", e);
-    return "Ndodhi një gabim gjatë analizimit. Provoni sërish.";
-  }
+Pyetja: ${query}
+
+Udhëzime:
+- Përdor bazën ligjore nëse ekziston
+- Cito nenet e ligjit
+- Përdor tone profesionale
+`;
+
+  const response = await model.generateContent([
+    { role: "user", parts: [...fileParts, ...lawParts, { text: finalPrompt }] },
+  ]);
+
+  return await extractText(response);
 };
